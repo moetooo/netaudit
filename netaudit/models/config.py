@@ -5,6 +5,13 @@ from typing import Optional
 
 
 @dataclass
+class PeerLink:
+    """Represents a topology connection between two interfaces."""
+    local_interface: str
+    remote_device: str
+    remote_interface: str
+
+@dataclass
 class Vlan:
     """Represents a VLAN definition."""
     vlan_id: int

@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from netaudit.models.config import Device, Interface, Vlan
+from netaudit.models.config import Device, Interface, Vlan, PeerLink
 from netaudit.rules.engine import audit_device
 from netaudit.parser.ios_parser import parse_ios_config
 
@@ -361,59 +361,69 @@ def test_two_trunks_same_native_vlan_no_finding():
     device = Device(hostname="SW1")
     device.vlans[10] = Vlan(vlan_id=10)
     device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", native_vlan=10)
-    device.interfaces["Gi0/2"] = Interface(name="Gi0/2", mode="trunk", native_vlan=10)
-    findings = audit_device(device)
+    
+    remote_device = Device(hostname="SW2")
+    remote_device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", native_vlan=10)
+    
+    topology = [PeerLink(local_interface="Gi0/1", remote_device="SW2", remote_interface="Gi0/1")]
+    network = {"SW2": remote_device}
+    
+    findings = audit_device(device, network=network, topology=topology)
     assert len(findings) == 0
 
 def test_two_trunks_different_native_vlans_finding():
     device = Device(hostname="SW1")
     device.vlans[10] = Vlan(vlan_id=10)
+    device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", native_vlan=10)
+    
+    remote_device = Device(hostname="SW2")
+    remote_device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", native_vlan=20)
+    
+    topology = [PeerLink(local_interface="Gi0/1", remote_device="SW2", remote_interface="Gi0/1")]
+    network = {"SW2": remote_device}
+    
+    findings = audit_device(device, network=network, topology=topology)
+    assert len(findings) == 1
+    assert findings[0].rule_id == "VLAN-003"
+    assert findings[0].interface == "SW1:Gi0/1, SW2:Gi0/1"
+    assert findings[0].evidence == "10, 20"
+
+def test_unrelated_trunks_ignored_vlan_003():
+    device = Device(hostname="SW1")
+    device.vlans[10] = Vlan(vlan_id=10)
     device.vlans[20] = Vlan(vlan_id=20)
     device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", native_vlan=10)
     device.interfaces["Gi0/2"] = Interface(name="Gi0/2", mode="trunk", native_vlan=20)
-    findings = audit_device(device)
-    assert len(findings) == 1
-    assert findings[0].rule_id == "VLAN-003"
-    assert findings[0].interface == "Gi0/1, Gi0/2"
-    assert findings[0].evidence == "10, 20"
-
-def test_trunk_without_native_vlan_ignored():
-    device = Device(hostname="SW1")
-    device.vlans[10] = Vlan(vlan_id=10)
-    device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", native_vlan=10)
-    device.interfaces["Gi0/2"] = Interface(name="Gi0/2", mode="trunk")
+    # No topology defined
     findings = audit_device(device)
     assert len(findings) == 0
 
 def test_access_interfaces_ignored_by_vlan_003():
     device = Device(hostname="SW1")
     device.vlans[10] = Vlan(vlan_id=10)
-    device.vlans[20] = Vlan(vlan_id=20)
     device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="access", native_vlan=10)
-    device.interfaces["Gi0/2"] = Interface(name="Gi0/2", mode="access", native_vlan=20)
-    findings = audit_device(device)
+    
+    remote_device = Device(hostname="SW2")
+    remote_device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="access", native_vlan=20)
+    
+    topology = [PeerLink(local_interface="Gi0/1", remote_device="SW2", remote_interface="Gi0/1")]
+    network = {"SW2": remote_device}
+    
+    findings = audit_device(device, network=network, topology=topology)
     assert len(findings) == 0
-
-def test_three_trunks_one_mismatch_findings():
-    device = Device(hostname="SW1")
-    device.vlans[10] = Vlan(vlan_id=10)
-    device.vlans[20] = Vlan(vlan_id=20)
-    device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", native_vlan=10)
-    device.interfaces["Gi0/2"] = Interface(name="Gi0/2", mode="trunk", native_vlan=10)
-    device.interfaces["Gi0/3"] = Interface(name="Gi0/3", mode="trunk", native_vlan=20)
-    findings = audit_device(device)
-    assert len(findings) == 2
-    rule_ids = {f.rule_id for f in findings}
-    interfaces = {f.interface for f in findings}
-    assert rule_ids == {"VLAN-003"}
-    assert interfaces == {"Gi0/1, Gi0/3", "Gi0/2, Gi0/3"}
 
 def test_vlan_004_identical_allowed_vlans_no_finding():
     device = Device(hostname="SW1")
     device.vlans[10] = Vlan(vlan_id=10)
     device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", allowed_vlans=[10])
-    device.interfaces["Gi0/2"] = Interface(name="Gi0/2", mode="trunk", allowed_vlans=[10])
-    findings = audit_device(device)
+    
+    remote_device = Device(hostname="SW2")
+    remote_device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", allowed_vlans=[10])
+    
+    topology = [PeerLink(local_interface="Gi0/1", remote_device="SW2", remote_interface="Gi0/1")]
+    network = {"SW2": remote_device}
+    
+    findings = audit_device(device, network=network, topology=topology)
     assert len(findings) == 0
 
 def test_vlan_004_same_vlans_different_order_no_finding():
@@ -421,55 +431,73 @@ def test_vlan_004_same_vlans_different_order_no_finding():
     device.vlans[10] = Vlan(vlan_id=10)
     device.vlans[20] = Vlan(vlan_id=20)
     device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", allowed_vlans=[10, 20])
-    device.interfaces["Gi0/2"] = Interface(name="Gi0/2", mode="trunk", allowed_vlans=[20, 10])
-    findings = audit_device(device)
+    
+    remote_device = Device(hostname="SW2")
+    remote_device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", allowed_vlans=[20, 10])
+    
+    topology = [PeerLink(local_interface="Gi0/1", remote_device="SW2", remote_interface="Gi0/1")]
+    network = {"SW2": remote_device}
+    
+    findings = audit_device(device, network=network, topology=topology)
     assert len(findings) == 0
 
 def test_vlan_004_different_allowed_vlans_finding():
     device = Device(hostname="SW1")
     device.vlans[10] = Vlan(vlan_id=10)
+    device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", allowed_vlans=[10])
+    
+    remote_device = Device(hostname="SW2")
+    remote_device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", allowed_vlans=[20])
+    
+    topology = [PeerLink(local_interface="Gi0/1", remote_device="SW2", remote_interface="Gi0/1")]
+    network = {"SW2": remote_device}
+    
+    findings = audit_device(device, network=network, topology=topology)
+    assert len(findings) == 1
+    assert findings[0].rule_id == "VLAN-004"
+    assert findings[0].interface == "SW1:Gi0/1, SW2:Gi0/1"
+    assert findings[0].evidence == "[10] vs [20]"
+
+def test_unrelated_trunks_ignored_vlan_004():
+    device = Device(hostname="SW1")
+    device.vlans[10] = Vlan(vlan_id=10)
     device.vlans[20] = Vlan(vlan_id=20)
     device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", allowed_vlans=[10])
     device.interfaces["Gi0/2"] = Interface(name="Gi0/2", mode="trunk", allowed_vlans=[20])
-    findings = audit_device(device)
-    assert len(findings) == 1
-    assert findings[0].rule_id == "VLAN-004"
-    assert findings[0].interface == "Gi0/1, Gi0/2"
-    assert findings[0].evidence == "[10] vs [20]"
-
-def test_vlan_004_trunk_without_allowed_vlans_ignored():
-    device = Device(hostname="SW1")
-    device.vlans[10] = Vlan(vlan_id=10)
-    device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", allowed_vlans=[10])
-    device.interfaces["Gi0/2"] = Interface(name="Gi0/2", mode="trunk")
+    # No topology defined
     findings = audit_device(device)
     assert len(findings) == 0
 
 def test_vlan_004_access_interfaces_ignored():
     device = Device(hostname="SW1")
     device.vlans[10] = Vlan(vlan_id=10)
-    device.vlans[20] = Vlan(vlan_id=20)
     device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="access", allowed_vlans=[10])
-    device.interfaces["Gi0/2"] = Interface(name="Gi0/2", mode="access", allowed_vlans=[20])
-    findings = audit_device(device)
+    
+    remote_device = Device(hostname="SW2")
+    remote_device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="access", allowed_vlans=[20])
+    
+    topology = [PeerLink(local_interface="Gi0/1", remote_device="SW2", remote_interface="Gi0/1")]
+    network = {"SW2": remote_device}
+    
+    findings = audit_device(device, network=network, topology=topology)
     assert len(findings) == 0
 
-def test_vlan_004_three_trunks_one_mismatch():
-    device = Device(hostname="SW1")
+def test_topology_duplicate_finding_prevention():
+    # If SW2 is audited instead, with SW1 as peer, it shouldn't generate a finding if dev_name >= remote_device
+    device = Device(hostname="SW2")
     device.vlans[10] = Vlan(vlan_id=10)
-    device.vlans[20] = Vlan(vlan_id=20)
-    device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", allowed_vlans=[10, 20])
-    device.interfaces["Gi0/2"] = Interface(name="Gi0/2", mode="trunk", allowed_vlans=[10, 20])
-    device.interfaces["Gi0/3"] = Interface(name="Gi0/3", mode="trunk", allowed_vlans=[10])
-    findings = audit_device(device)
+    device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", native_vlan=10)
     
-    vlan4_findings = [f for f in findings if f.rule_id == "VLAN-004"]
-    assert len(vlan4_findings) == 2
-    interfaces = {f.interface for f in vlan4_findings}
-    assert interfaces == {"Gi0/1, Gi0/3", "Gi0/2, Gi0/3"}
-    # The sorted evidence strings
-    evidences = {f.evidence for f in vlan4_findings}
-    assert evidences == {"[10, 20] vs [10]", "[10, 20] vs [10]"}
+    remote_device = Device(hostname="SW1")
+    remote_device.vlans[20] = Vlan(vlan_id=20)
+    remote_device.interfaces["Gi0/1"] = Interface(name="Gi0/1", mode="trunk", native_vlan=20)
+    
+    topology = [PeerLink(local_interface="Gi0/1", remote_device="SW1", remote_interface="Gi0/1")]
+    network = {"SW1": remote_device}
+    
+    findings = audit_device(device, network=network, topology=topology)
+    # Finding suppressed because "SW2" > "SW1"
+    assert len(findings) == 0
 
 def test_ip_004_valid_svi_host_address_no_finding():
     device = Device(hostname="SW1")
@@ -478,7 +506,7 @@ def test_ip_004_valid_svi_host_address_no_finding():
     findings = audit_device(device)
     assert len(findings) == 0
 
-def test_ip_004_svi_network_address_finding():
+def test_ip_004_network_address_finding():
     device = Device(hostname="SW1")
     device.vlans[10] = Vlan(vlan_id=10)
     device.interfaces["Vlan10"] = Interface(name="Vlan10", ip_address="192.168.10.0", subnet_mask="255.255.255.0")
@@ -488,7 +516,7 @@ def test_ip_004_svi_network_address_finding():
     assert findings[0].interface == "Vlan10"
     assert findings[0].evidence == "192.168.10.0/24"
 
-def test_ip_004_svi_broadcast_address_finding():
+def test_ip_004_broadcast_address_finding():
     device = Device(hostname="SW1")
     device.vlans[10] = Vlan(vlan_id=10)
     device.interfaces["Vlan10"] = Interface(name="Vlan10", ip_address="192.168.10.255", subnet_mask="255.255.255.0")
@@ -498,14 +526,14 @@ def test_ip_004_svi_broadcast_address_finding():
     assert findings[0].interface == "Vlan10"
     assert findings[0].evidence == "192.168.10.255/24"
 
-def test_ip_004_svi_without_ip_ignored():
+def test_ip_004_without_ip_ignored():
     device = Device(hostname="SW1")
     device.vlans[10] = Vlan(vlan_id=10)
     device.interfaces["Vlan10"] = Interface(name="Vlan10")
     findings = audit_device(device)
     assert len(findings) == 0
 
-def test_ip_004_svi_invalid_ip_gets_ip_001_only():
+def test_ip_004_invalid_ip_gets_ip_001_only():
     device = Device(hostname="SW1")
     device.vlans[10] = Vlan(vlan_id=10)
     device.interfaces["Vlan10"] = Interface(name="Vlan10", ip_address="192.168.10.999", subnet_mask="255.255.255.0")
@@ -513,9 +541,19 @@ def test_ip_004_svi_invalid_ip_gets_ip_001_only():
     assert len(findings) == 1
     assert findings[0].rule_id == "IP-001"
 
-def test_ip_004_physical_interface_network_address_ignored():
+def test_ip_004_physical_interface_network_address_finding():
     device = Device(hostname="SW1")
-    # A physical interface with network address
     device.interfaces["Gi0/1"] = Interface(name="Gi0/1", ip_address="192.168.10.0", subnet_mask="255.255.255.0")
+    findings = audit_device(device)
+    assert len(findings) == 1
+    assert findings[0].rule_id == "IP-004"
+    assert findings[0].interface == "Gi0/1"
+
+def test_ip_004_31_subnet_ignored():
+    device = Device(hostname="SW1")
+    # 192.168.10.0 and .1 are valid host addresses for /31
+    device.interfaces["Gi0/1"] = Interface(name="Gi0/1", ip_address="192.168.10.0", subnet_mask="255.255.255.254")
+    # Put Gi0/2 on a different subnet so IP-003 isn't triggered
+    device.interfaces["Gi0/2"] = Interface(name="Gi0/2", ip_address="192.168.10.2", subnet_mask="255.255.255.254")
     findings = audit_device(device)
     assert len(findings) == 0

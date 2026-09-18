@@ -24,8 +24,8 @@ def main(args=None):
         print(f"Error reading file: {e}", file=sys.stderr)
         sys.exit(1)
         
-    parser_instance = IOSParser(content)
-    device = parser_instance.parse()
+    parser_instance = IOSParser()
+    device = parser_instance.parse(content)
     
     from netaudit.reports.formatter import format_findings, format_findings_json
     

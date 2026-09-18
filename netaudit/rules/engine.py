@@ -1,6 +1,6 @@
 import ipaddress
 from dataclasses import dataclass
-from netaudit.models.config import Device
+from netaudit.models.config import Device, PeerLink
 
 @dataclass
 class Finding:
@@ -11,9 +11,14 @@ class Finding:
     evidence: str
     description: str
 
-def audit_device(device: Device) -> list[Finding]:
+def audit_device(device: Device, network: dict[str, Device] = None, topology: list[PeerLink] = None) -> list[Finding]:
     findings = []
     seen = set()
+    
+    if network is None:
+        network = {}
+    if topology is None:
+        topology = []
 
     def add_finding(rule_id: str, severity: str, dev_name: str, iface_name: str, evidence: str, description: str):
         key = (dev_name, iface_name, evidence, rule_id)
@@ -34,8 +39,6 @@ def audit_device(device: Device) -> list[Finding]:
     ip_to_interfaces = {}
     valid_networks = []
     used_vlans = set()
-    trunk_native_vlans = []
-    trunk_allowed_vlans = []
 
     for iface_name, iface in device.interfaces.items():
         # Check SVI-001 and track used VLANs
@@ -81,14 +84,6 @@ def audit_device(device: Device) -> list[Finding]:
                     description=f"VLAN {iface.native_vlan} is used as native VLAN but not defined on the device."
                 )
 
-        # Track trunk native VLANs for VLAN-003
-        if iface.mode == "trunk" and iface.native_vlan is not None:
-            trunk_native_vlans.append((iface_name, iface.native_vlan))
-
-        # Track trunk allowed VLANs for VLAN-004
-        if iface.mode == "trunk" and iface.allowed_vlans:
-            trunk_allowed_vlans.append((iface_name, iface.allowed_vlans))
-
         # Check allowed VLANs and track used VLANs
         for vlan in iface.allowed_vlans:
             used_vlans.add(vlan)
@@ -108,8 +103,8 @@ def audit_device(device: Device) -> list[Finding]:
                 ip_iface = ipaddress.IPv4Interface(f"{iface.ip_address}/{iface.subnet_mask}")
                 valid_networks.append((iface_name, iface.ip_address, ip_iface.network))
                 
-                # Check IP-004: SVI gateway address validity
-                if iface_name.startswith("Vlan"):
+                # Check IP-004: Interface gateway address validity
+                if ip_iface.network.prefixlen not in (31, 32):
                     if ip_iface.ip == ip_iface.network.network_address or ip_iface.ip == ip_iface.network.broadcast_address:
                         add_finding(
                             rule_id="IP-004",
@@ -117,7 +112,7 @@ def audit_device(device: Device) -> list[Finding]:
                             dev_name=dev_name,
                             iface_name=iface_name,
                             evidence=str(ip_iface),
-                            description=f"SVI {iface_name} IP address cannot be the network or broadcast address.",
+                            description=f"Interface {iface_name} IP address cannot be the network or broadcast address.",
                         )
             except (ValueError, ipaddress.AddressValueError, ipaddress.NetmaskValueError):
                 add_finding(
@@ -179,51 +174,43 @@ def audit_device(device: Device) -> list[Finding]:
                 description=f"VLAN {vlan_id} is defined but not referenced by any interface or SVI.",
             )
 
-    # Check VLAN-003: Native VLAN mismatch on trunk interfaces
-    for i in range(len(trunk_native_vlans)):
-        for j in range(i + 1, len(trunk_native_vlans)):
-            iface1_name, nvlan1 = trunk_native_vlans[i]
-            iface2_name, nvlan2 = trunk_native_vlans[j]
-            
-            if nvlan1 != nvlan2:
-                # Sort interface names alphabetically to ensure consistent string formatting
-                if iface1_name < iface2_name:
-                    ifaces_str = f"{iface1_name}, {iface2_name}"
-                    evidence_str = f"{nvlan1}, {nvlan2}"
-                else:
-                    ifaces_str = f"{iface2_name}, {iface1_name}"
-                    evidence_str = f"{nvlan2}, {nvlan1}"
+    # Check VLAN-003 and VLAN-004: Topology-aware trunk comparisons
+    for link in topology:
+        if link.local_interface in device.interfaces:
+            # We only process the link if the local device's hostname is alphabetically less than the remote device's hostname
+            # to avoid generating duplicate findings when auditing the whole network.
+            if link.remote_device in network and dev_name < link.remote_device:
+                local_iface = device.interfaces[link.local_interface]
+                remote_dev = network[link.remote_device]
                 
-                add_finding(
-                    rule_id="VLAN-003",
-                    severity="ERROR",
-                    dev_name=dev_name,
-                    iface_name=ifaces_str,
-                    evidence=evidence_str,
-                    description=f"Trunk interfaces {ifaces_str} have mismatched native VLANs.",
-                )
-
-    # Check VLAN-004: Trunk allowed VLAN mismatch
-    for i in range(len(trunk_allowed_vlans)):
-        for j in range(i + 1, len(trunk_allowed_vlans)):
-            iface1_name, allowed1 = trunk_allowed_vlans[i]
-            iface2_name, allowed2 = trunk_allowed_vlans[j]
-            
-            if set(allowed1) != set(allowed2):
-                if iface1_name < iface2_name:
-                    ifaces_str = f"{iface1_name}, {iface2_name}"
-                    evidence_str = f"{sorted(allowed1)} vs {sorted(allowed2)}"
-                else:
-                    ifaces_str = f"{iface2_name}, {iface1_name}"
-                    evidence_str = f"{sorted(allowed2)} vs {sorted(allowed1)}"
-                
-                add_finding(
-                    rule_id="VLAN-004",
-                    severity="ERROR",
-                    dev_name=dev_name,
-                    iface_name=ifaces_str,
-                    evidence=evidence_str,
-                    description=f"Trunk interfaces {ifaces_str} have mismatched allowed VLAN lists.",
-                )
+                if link.remote_interface in remote_dev.interfaces:
+                    remote_iface = remote_dev.interfaces[link.remote_interface]
+                    
+                    if local_iface.mode == "trunk" and remote_iface.mode == "trunk":
+                        # VLAN-003: Native VLAN mismatch
+                        if local_iface.native_vlan != remote_iface.native_vlan:
+                            ifaces_str = f"{dev_name}:{link.local_interface}, {link.remote_device}:{link.remote_interface}"
+                            evidence_str = f"{local_iface.native_vlan}, {remote_iface.native_vlan}"
+                            add_finding(
+                                rule_id="VLAN-003",
+                                severity="ERROR",
+                                dev_name=dev_name,
+                                iface_name=ifaces_str,
+                                evidence=evidence_str,
+                                description=f"Trunk interfaces {ifaces_str} have mismatched native VLANs.",
+                            )
+                            
+                        # VLAN-004: Trunk allowed VLAN mismatch
+                        if set(local_iface.allowed_vlans) != set(remote_iface.allowed_vlans):
+                            ifaces_str = f"{dev_name}:{link.local_interface}, {link.remote_device}:{link.remote_interface}"
+                            evidence_str = f"{sorted(local_iface.allowed_vlans)} vs {sorted(remote_iface.allowed_vlans)}"
+                            add_finding(
+                                rule_id="VLAN-004",
+                                severity="ERROR",
+                                dev_name=dev_name,
+                                iface_name=ifaces_str,
+                                evidence=evidence_str,
+                                description=f"Trunk interfaces {ifaces_str} have mismatched allowed VLAN lists.",
+                            )
 
     return findings

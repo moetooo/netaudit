@@ -46,9 +46,11 @@ def normalize_interface_name(raw_name: str) -> str:
 def parse_vlan_list(vlan_str: str) -> list[int]:
     """Parse comma-separated VLAN IDs and ranges (e.g., '10,20,30' or '10-12,20') into sorted ints."""
     vlan_set: set[int] = set()
-    cleaned = vlan_str.strip()
+    
+    # Remove Cisco modifiers before processing
+    cleaned = re.sub(r'^(add|remove|except)\s+', '', vlan_str.strip(), flags=re.IGNORECASE).strip()
 
-    if not cleaned or cleaned.lower() == "none":
+    if not cleaned or cleaned.lower() == "none" or cleaned.lower() == "all":
         return []
 
     for token in cleaned.split(","):
