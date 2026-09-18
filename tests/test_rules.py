@@ -470,3 +470,52 @@ def test_vlan_004_three_trunks_one_mismatch():
     # The sorted evidence strings
     evidences = {f.evidence for f in vlan4_findings}
     assert evidences == {"[10, 20] vs [10]", "[10, 20] vs [10]"}
+
+def test_ip_004_valid_svi_host_address_no_finding():
+    device = Device(hostname="SW1")
+    device.vlans[10] = Vlan(vlan_id=10)
+    device.interfaces["Vlan10"] = Interface(name="Vlan10", ip_address="192.168.10.1", subnet_mask="255.255.255.0")
+    findings = audit_device(device)
+    assert len(findings) == 0
+
+def test_ip_004_svi_network_address_finding():
+    device = Device(hostname="SW1")
+    device.vlans[10] = Vlan(vlan_id=10)
+    device.interfaces["Vlan10"] = Interface(name="Vlan10", ip_address="192.168.10.0", subnet_mask="255.255.255.0")
+    findings = audit_device(device)
+    assert len(findings) == 1
+    assert findings[0].rule_id == "IP-004"
+    assert findings[0].interface == "Vlan10"
+    assert findings[0].evidence == "192.168.10.0/24"
+
+def test_ip_004_svi_broadcast_address_finding():
+    device = Device(hostname="SW1")
+    device.vlans[10] = Vlan(vlan_id=10)
+    device.interfaces["Vlan10"] = Interface(name="Vlan10", ip_address="192.168.10.255", subnet_mask="255.255.255.0")
+    findings = audit_device(device)
+    assert len(findings) == 1
+    assert findings[0].rule_id == "IP-004"
+    assert findings[0].interface == "Vlan10"
+    assert findings[0].evidence == "192.168.10.255/24"
+
+def test_ip_004_svi_without_ip_ignored():
+    device = Device(hostname="SW1")
+    device.vlans[10] = Vlan(vlan_id=10)
+    device.interfaces["Vlan10"] = Interface(name="Vlan10")
+    findings = audit_device(device)
+    assert len(findings) == 0
+
+def test_ip_004_svi_invalid_ip_gets_ip_001_only():
+    device = Device(hostname="SW1")
+    device.vlans[10] = Vlan(vlan_id=10)
+    device.interfaces["Vlan10"] = Interface(name="Vlan10", ip_address="192.168.10.999", subnet_mask="255.255.255.0")
+    findings = audit_device(device)
+    assert len(findings) == 1
+    assert findings[0].rule_id == "IP-001"
+
+def test_ip_004_physical_interface_network_address_ignored():
+    device = Device(hostname="SW1")
+    # A physical interface with network address
+    device.interfaces["Gi0/1"] = Interface(name="Gi0/1", ip_address="192.168.10.0", subnet_mask="255.255.255.0")
+    findings = audit_device(device)
+    assert len(findings) == 0

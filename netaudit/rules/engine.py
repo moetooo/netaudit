@@ -107,6 +107,18 @@ def audit_device(device: Device) -> list[Finding]:
             try:
                 ip_iface = ipaddress.IPv4Interface(f"{iface.ip_address}/{iface.subnet_mask}")
                 valid_networks.append((iface_name, iface.ip_address, ip_iface.network))
+                
+                # Check IP-004: SVI gateway address validity
+                if iface_name.startswith("Vlan"):
+                    if ip_iface.ip == ip_iface.network.network_address or ip_iface.ip == ip_iface.network.broadcast_address:
+                        add_finding(
+                            rule_id="IP-004",
+                            severity="ERROR",
+                            dev_name=dev_name,
+                            iface_name=iface_name,
+                            evidence=str(ip_iface),
+                            description=f"SVI {iface_name} IP address cannot be the network or broadcast address.",
+                        )
             except (ValueError, ipaddress.AddressValueError, ipaddress.NetmaskValueError):
                 add_finding(
                     rule_id="IP-001",
