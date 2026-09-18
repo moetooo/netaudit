@@ -33,32 +33,65 @@ def audit_device(device: Device) -> list[Finding]:
     dev_name = device.hostname or "Unknown"
     ip_to_interfaces = {}
     valid_networks = []
+    used_vlans = set()
+    trunk_native_vlans = []
+    trunk_allowed_vlans = []
 
     for iface_name, iface in device.interfaces.items():
-        # Check access VLAN
-        if iface.access_vlan is not None and iface.access_vlan not in device.vlans:
-            add_finding(
-                rule_id="VLAN-001",
-                severity="ERROR",
-                dev_name=dev_name,
-                iface_name=iface_name,
-                evidence=str(iface.access_vlan),
-                description=f"VLAN {iface.access_vlan} is used as access VLAN but not defined on the device."
-            )
-        
-        # Check native VLAN
-        if iface.native_vlan is not None and iface.native_vlan not in device.vlans:
-            add_finding(
-                rule_id="VLAN-001",
-                severity="ERROR",
-                dev_name=dev_name,
-                iface_name=iface_name,
-                evidence=str(iface.native_vlan),
-                description=f"VLAN {iface.native_vlan} is used as native VLAN but not defined on the device."
-            )
+        # Check SVI-001 and track used VLANs
+        if iface_name.startswith("Vlan"):
+            try:
+                svi_vlan_id = int(iface_name[4:])
+                used_vlans.add(svi_vlan_id)
+                if svi_vlan_id not in device.vlans:
+                    add_finding(
+                        rule_id="SVI-001",
+                        severity="ERROR",
+                        dev_name=dev_name,
+                        iface_name=iface_name,
+                        evidence=str(svi_vlan_id),
+                        description=f"SVI {iface_name} references VLAN {svi_vlan_id} which is not defined on the device.",
+                    )
+            except ValueError:
+                pass
 
-        # Check allowed VLANs
+        # Check access VLAN and track used VLANs
+        if iface.access_vlan is not None:
+            used_vlans.add(iface.access_vlan)
+            if iface.access_vlan not in device.vlans:
+                add_finding(
+                    rule_id="VLAN-001",
+                    severity="ERROR",
+                    dev_name=dev_name,
+                    iface_name=iface_name,
+                    evidence=str(iface.access_vlan),
+                    description=f"VLAN {iface.access_vlan} is used as access VLAN but not defined on the device."
+                )
+        
+        # Check native VLAN and track used VLANs
+        if iface.native_vlan is not None:
+            used_vlans.add(iface.native_vlan)
+            if iface.native_vlan not in device.vlans:
+                add_finding(
+                    rule_id="VLAN-001",
+                    severity="ERROR",
+                    dev_name=dev_name,
+                    iface_name=iface_name,
+                    evidence=str(iface.native_vlan),
+                    description=f"VLAN {iface.native_vlan} is used as native VLAN but not defined on the device."
+                )
+
+        # Track trunk native VLANs for VLAN-003
+        if iface.mode == "trunk" and iface.native_vlan is not None:
+            trunk_native_vlans.append((iface_name, iface.native_vlan))
+
+        # Track trunk allowed VLANs for VLAN-004
+        if iface.mode == "trunk" and iface.allowed_vlans:
+            trunk_allowed_vlans.append((iface_name, iface.allowed_vlans))
+
+        # Check allowed VLANs and track used VLANs
         for vlan in iface.allowed_vlans:
+            used_vlans.add(vlan)
             if vlan not in device.vlans:
                 add_finding(
                     rule_id="VLAN-001",
@@ -120,6 +153,65 @@ def audit_device(device: Device) -> list[Finding]:
                     iface_name=ifaces_str,
                     evidence=evidence,
                     description=f"IPv4 subnets overlap between {iface1_name} ({net1}) and {iface2_name} ({net2}).",
+                )
+
+    # Check VLAN-002: Defined but unused VLANs
+    for vlan_id in device.vlans:
+        if vlan_id not in used_vlans:
+            add_finding(
+                rule_id="VLAN-002",
+                severity="WARNING",
+                dev_name=dev_name,
+                iface_name="",
+                evidence=str(vlan_id),
+                description=f"VLAN {vlan_id} is defined but not referenced by any interface or SVI.",
+            )
+
+    # Check VLAN-003: Native VLAN mismatch on trunk interfaces
+    for i in range(len(trunk_native_vlans)):
+        for j in range(i + 1, len(trunk_native_vlans)):
+            iface1_name, nvlan1 = trunk_native_vlans[i]
+            iface2_name, nvlan2 = trunk_native_vlans[j]
+            
+            if nvlan1 != nvlan2:
+                # Sort interface names alphabetically to ensure consistent string formatting
+                if iface1_name < iface2_name:
+                    ifaces_str = f"{iface1_name}, {iface2_name}"
+                    evidence_str = f"{nvlan1}, {nvlan2}"
+                else:
+                    ifaces_str = f"{iface2_name}, {iface1_name}"
+                    evidence_str = f"{nvlan2}, {nvlan1}"
+                
+                add_finding(
+                    rule_id="VLAN-003",
+                    severity="ERROR",
+                    dev_name=dev_name,
+                    iface_name=ifaces_str,
+                    evidence=evidence_str,
+                    description=f"Trunk interfaces {ifaces_str} have mismatched native VLANs.",
+                )
+
+    # Check VLAN-004: Trunk allowed VLAN mismatch
+    for i in range(len(trunk_allowed_vlans)):
+        for j in range(i + 1, len(trunk_allowed_vlans)):
+            iface1_name, allowed1 = trunk_allowed_vlans[i]
+            iface2_name, allowed2 = trunk_allowed_vlans[j]
+            
+            if set(allowed1) != set(allowed2):
+                if iface1_name < iface2_name:
+                    ifaces_str = f"{iface1_name}, {iface2_name}"
+                    evidence_str = f"{sorted(allowed1)} vs {sorted(allowed2)}"
+                else:
+                    ifaces_str = f"{iface2_name}, {iface1_name}"
+                    evidence_str = f"{sorted(allowed2)} vs {sorted(allowed1)}"
+                
+                add_finding(
+                    rule_id="VLAN-004",
+                    severity="ERROR",
+                    dev_name=dev_name,
+                    iface_name=ifaces_str,
+                    evidence=evidence_str,
+                    description=f"Trunk interfaces {ifaces_str} have mismatched allowed VLAN lists.",
                 )
 
     return findings
